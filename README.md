@@ -58,7 +58,7 @@ The plugin needs Bun on this machine and key-based ssh to each host. tmux tools 
 - Every tool takes `host`. Omit it for this machine.
 - Every result is an envelope: `data` on success, or `error` with a `code` and a `hint`.
 - On Windows the exit code is the last native program's code, or 1 when PowerShell wrote an error. Each Windows call costs about 1 s more than a posix one.
-- `exec` stops the local ssh at `timeout_s`. On Windows the remote program can keep running, so use a scheduled task or WSL tmux for long jobs there.
+- `exec` stops the local ssh at `timeout_s`. On Windows it then kills the remote program by its recorded PID with a second ssh call, so a timed out job stops. If that call fails too, the program can keep running; use a scheduled task or WSL tmux for long jobs there.
 
 ## Configuration
 

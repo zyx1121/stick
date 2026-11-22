@@ -48,7 +48,7 @@ export function hostTools(run: Spawn, oses: OsCache, configPath?: string): Toolb
         exit_code: z.number().nullable(),
         stdout: z.string(),
         stderr: z.string(),
-        timed_out: z.boolean().describe("True when the timeout stopped the call. On Windows the remote program may still run."),
+        timed_out: z.boolean().describe("True when the timeout stopped the call. On Windows stick then kills the remote program, but that can fail."),
         elapsed_ms: z.number(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { SSH, type Os, type Spawn } from "./os.ts";
 
 function utf16Base64(text: string): string {
@@ -38,24 +39,31 @@ const WINDOWS_RUNNER = [
  * powershell.exe parses it. It reads the script from stdin as base64 lines up
  * to a line holding "." (Windows OpenSSH never passes end of input), saves it
  * to a temp file, and runs WINDOWS_RUNNER in a child whose stdin is an empty
- * file. Otherwise a native program in the script (git, cmd) would wait on the
+ * file. The first stdin line is a run id: the child's PID goes to
+ * %TEMP%\\stick-<id>.pid so killRun can stop it after a timeout. Otherwise a native program in the script (git, cmd) would wait on the
  * ssh stdin that never closes.
  */
 const WINDOWS_OUTER = [
-  `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
+  `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$id=[Console]::In.ReadLine();$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
   `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
-  `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -Wait -PassThru -RedirectStandardInput $n`,
-  `Remove-Item $f,$n -Force;exit $p.ExitCode`,
+  `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -PassThru -RedirectStandardInput $n`,
+  `$null=$p.Handle;$k=Join-Path $env:TEMP "stick-$id.pid";[IO.File]::WriteAllText($k,[string]$p.Id);$p.WaitForExit()`,
+  `Remove-Item $f,$n,$k -Force -ErrorAction SilentlyContinue;exit $p.ExitCode`,
 ].join(";");
 
 export const WINDOWS_COMMAND = `powershell -NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_OUTER)}`;
 
-/** The script as base64 lines of 76 characters, then the sentinel. */
-export function windowsStdin(script: string): string {
+/** The run id, then the script as base64 lines of 76 characters, then the sentinel. */
+export function windowsStdin(script: string, id: string): string {
   const b64 = Buffer.from(script, "utf8").toString("base64");
-  return (b64.match(/.{1,76}/g) ?? []).join("\n") + "\n.\n";
+  return id + "\n" + (b64.match(/.{1,76}/g) ?? []).join("\n") + "\n.\n";
+}
+
+/** Script that stops the program of a timed out Windows run, with its children. */
+export function killScript(id: string): string {
+  return `$k=Join-Path $env:TEMP 'stick-${id}.pid';if(Test-Path -LiteralPath $k){$t=(Get-Content -LiteralPath $k -Raw).Trim();taskkill /PID $t /T /F *>$null;Remove-Item -LiteralPath $k -Force -ErrorAction SilentlyContinue}`;
 }
 
 export function posixQuote(word: string): string {
@@ -77,13 +85,13 @@ export function powershellQuote(word: string): string {
 }
 
 /** Build the argv and stdin that run `command` on a host of the given OS. */
-export function plan(host: string | undefined, os: Os, command: string, cwd?: string): { argv: string[]; stdin: string } {
+export function plan(host: string | undefined, os: Os, command: string, cwd?: string, id = randomUUID().replaceAll("-", "")): { argv: string[]; stdin: string } {
   if (os === "windows") {
     // The path travels as base64, so no quote character in it (PowerShell also treats curly quotes as quotes) can end the string.
     const dir = cwd ? `Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(cwd, "utf8").toString("base64")}'))) -ErrorAction Stop\n` : "";
     const script = dir + command;
     const argv = host ? [...SSH, host, "--", WINDOWS_COMMAND] : ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", WINDOWS_COMMAND.split(" ").at(-1)!];
-    return { argv, stdin: windowsStdin(script) };
+    return { argv, stdin: windowsStdin(script, id) };
   }
   const script = (cwd ? `cd -- ${posixQuote(cwd)} || exit 1\n` : "") + command + "\n";
   return { argv: host ? [...SSH, host, "--", POSIX_COMMAND] : ["sh", "-c", POSIX_RUNNER], stdin: script };
@@ -98,9 +106,15 @@ export function cleanStderr(stderr: string): string {
 }
 
 export async function execOn(run: Spawn, host: string | undefined, os: Os, command: string, cwd: string | undefined, timeoutMs: number) {
-  const { argv, stdin } = plan(host, os, command, cwd);
+  const id = randomUUID().replaceAll("-", "");
+  const { argv, stdin } = plan(host, os, command, cwd, id);
   const began = Date.now();
   const result = await run(argv, stdin, timeoutMs);
+  // Killing the local ssh does not stop a Windows program, so stop it by its recorded PID.
+  if (result.timedOut && os === "windows") {
+    const kill = plan(host, os, killScript(id), undefined, randomUUID().replaceAll("-", ""));
+    await run(kill.argv, kill.stdin, 20000).catch(() => {});
+  }
   // Windows ends lines with CRLF. Give every OS the same line endings.
   const lf = (text: string) => (os === "windows" ? text.replaceAll("\r\n", "\n") : text);
   let stdout = lf(result.stdout);

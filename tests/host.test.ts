@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sshHosts } from "../src/host/config.ts";
-import { cleanStderr, plan, POSIX_RUNNER, posixQuote, powershellQuote, WINDOWS_COMMAND, windowsStdin } from "../src/host/exec.ts";
+import { cleanStderr, execOn, killScript, plan, POSIX_RUNNER, posixQuote, powershellQuote, WINDOWS_COMMAND, windowsStdin } from "../src/host/exec.ts";
 import { OsCache, spawn, type Spawn } from "../src/host/os.ts";
 import { realClock } from "../src/tmux/pane.ts";
 import { spawnExec } from "../src/tmux/exec.ts";
@@ -12,18 +12,34 @@ import { allTools } from "../src/tools/index.ts";
 test("windows plan: fixed ASCII command line, script as base64 lines on stdin", () => {
   const script = `Get-Item "C:\\Users\\a b"; "中文 'q' \`"x\`""`;
   const cwd = "C:\\it's \u2019here\u2019; calc #";
-  const { argv, stdin } = plan("win", "windows", script, cwd);
+  const { argv, stdin } = plan("win", "windows", script, cwd, "abc123");
   expect(argv.at(-1)).toBe(WINDOWS_COMMAND);
   expect(WINDOWS_COMMAND).toMatch(/^powershell -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/);
   expect(WINDOWS_COMMAND.length).toBeLessThan(8000);
   const lines = stdin.trimEnd().split("\n");
+  expect(lines[0]).toBe("abc123");
   expect(lines.at(-1)).toBe(".");
-  expect(lines.slice(0, -1).every((line) => line.length <= 76)).toBe(true);
-  const decoded = Buffer.from(lines.slice(0, -1).join(""), "base64").toString("utf8");
+  expect(lines.slice(1, -1).every((line) => line.length <= 76)).toBe(true);
+  const decoded = Buffer.from(lines.slice(1, -1).join(""), "base64").toString("utf8");
   const b64 = Buffer.from(cwd, "utf8").toString("base64");
   expect(decoded).toBe(`Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))) -ErrorAction Stop\n${script}`);
   expect(b64).toMatch(/^[A-Za-z0-9+/=]+$/);
-  expect(windowsStdin("")).toBe("\n.\n");
+  expect(windowsStdin("", "x1")).toBe("x1\n\n.\n");
+});
+
+test("windows timeout: a second call kills the recorded run by its id", async () => {
+  const calls: { argv: string[]; stdin?: string }[] = [];
+  const run = async (argv: string[], stdin?: string) => {
+    calls.push({ argv, stdin });
+    return { code: null, stdout: "", stderr: "", timedOut: calls.length === 1 } as never;
+  };
+  await execOn(run, "win", "windows", "Start-Sleep 99", undefined, 10);
+  expect(calls).toHaveLength(2);
+  const id = calls[0]!.stdin!.split("\n")[0]!;
+  expect(id).toMatch(/^[0-9a-f]{32}$/);
+  const lines = calls[1]!.stdin!.trimEnd().split("\n").slice(1, -1);
+  expect(Buffer.from(lines.join(""), "base64").toString("utf8")).toBe(killScript(id));
+  expect(killScript(id)).toContain(`stick-${id}.pid`);
 });
 
 test("posix plan: the script goes on stdin to a runner that saves it first, cwd quoted", () => {
