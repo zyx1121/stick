@@ -21915,7 +21915,7 @@ function killScript(id) {
 function posixQuote(word) {
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
-var POSIX_RUNNER = `printf 'stick:ran\\n'; m=$(umask); umask 077; d="\${TMPDIR:-/tmp}/stick-$(id -u)"; mkdir -p "$d"; ` + `if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then exit 125; fi; chmod 700 "$d" || exit 125; ` + `umask "$m"; find "$d" -maxdepth 1 -type f -name 'run.*' -mmin +1440 -exec rm -f {} + 2>/dev/null; ` + `f=$(mktemp "$d/run.XXXXXX") || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` + `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
+var POSIX_RUNNER = `printf 'stick:ran\\n'; m=$(umask); umask 077; d="\${TMPDIR:-/tmp}/stick-$(id -u)"; mkdir -p "$d"; ` + `if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then echo "stick: unsafe script folder $d" >&2; exit 125; fi; chmod 700 "$d" || { echo "stick: unsafe script folder $d" >&2; exit 125; }; ` + `umask "$m"; find "$d" -maxdepth 1 -type f -name 'run.*' -mmin +1440 -exec rm -f {} + 2>/dev/null; ` + `f=$(mktemp "$d/run.XXXXXX") || { echo "stick: unsafe script folder $d" >&2; exit 125; }; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` + `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
 var POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 function powershellQuote(word) {
   return `'${word.replaceAll("'", "''")}'`;
@@ -23491,6 +23491,13 @@ function hostTools(run, oses, configPath) {
         const result = await execOn(run, host, os, command, cwd, (timeout_s ?? 120) * 1000);
         if (host && result.code === 255 && !result.timedOut && !result.ran)
           return fail(classify(host, result));
+        if (result.ran && result.code === 125 && result.stderr.startsWith("stick:")) {
+          return fail({
+            code: "runner_dir_unsafe",
+            message: result.stderr.trim(),
+            hint: "Set TMPDIR to a private folder for this user, or remove the stick-<uid> entry in the temp folder if you own it."
+          });
+        }
         return ok({
           os,
           exit_code: result.timedOut ? null : result.code,
