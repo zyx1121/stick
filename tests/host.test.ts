@@ -56,7 +56,7 @@ test("posix runner saves scripts in a private 0700 folder and sweeps old files",
     await mkdir(dir, { mode: 0o755 });
     const past = new Date(Date.now() - 2 * 86400_000);
     await mkdir(join(dir, "cache"));
-    for (const name of ["run.old", "settings.json", "cache/run.nested"]) {
+    for (const name of ["run.old", "run.abcdef", "settings.json", "cache/run.nested"]) {
       await writeFile(join(dir, name), "x");
       await utimes(join(dir, name), past, past);
     }
@@ -66,7 +66,7 @@ test("posix runner saves scripts in a private 0700 folder and sweeps old files",
     expect(await proc.exited).toBe(0);
     expect(out).toContain(`${dir}/run.`);
     expect(out).toContain("drwx------");
-    expect((await readdir(dir)).sort()).toEqual(["cache", "settings.json"]);
+    expect((await readdir(dir)).sort()).toEqual(["cache", "run.old", "settings.json"]);
     expect(await readdir(join(dir, "cache"))).toEqual(["run.nested"]);
   } finally {
     await rm(base, { recursive: true, force: true });
@@ -93,8 +93,23 @@ test("posix runner refuses a symlinked folder", async () => {
     await symlink(join(base, "other"), join(base, `stick-${process.getuid!()}`));
     const { argv, stdin } = plan(undefined, "posix", "echo hi");
     const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: base } });
-    await new Response(proc.stdout).text();
+    expect(await new Response(proc.stdout).text()).toBe("stick:ran\n");
     expect(await new Response(proc.stderr).text()).toBe(`stick: unsafe script folder ${join(base, `stick-${process.getuid!()}`)}\n`);
+    expect(await proc.exited).toBe(125);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("posix runner refuses a regular file in place of the folder", async () => {
+  const base = await mkdtemp(join(tmpdir(), "stick-runner-"));
+  try {
+    const path = join(base, `stick-${process.getuid!()}`);
+    await writeFile(path, "x");
+    const { argv, stdin } = plan(undefined, "posix", "echo hi");
+    const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: base } });
+    expect(await new Response(proc.stdout).text()).toBe("stick:ran\n");
+    expect(await new Response(proc.stderr).text()).toEndWith(`stick: unsafe script folder ${path}\n`);
     expect(await proc.exited).toBe(125);
   } finally {
     await rm(base, { recursive: true, force: true });

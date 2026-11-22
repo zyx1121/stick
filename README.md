@@ -70,7 +70,7 @@ SSH settings come from `~/.ssh/config`. Turn on connection sharing there (`Contr
 
 ## How it works
 
-- **posix**: `ssh host -- sh -c '...'` saves the script from stdin to a temp file, then runs it with bash and stdin on `/dev/null`.
+- **posix**: `ssh host -- sh -c '...'` saves the script from stdin to a temp file, then runs it with bash and stdin on `/dev/null`. The file lives in a private `stick-<uid>` folder (mode 0700) under `TMPDIR` or `/tmp`. The runner checks that folder once and then uses its path, so keep `TMPDIR` out of a world-writable folder without the sticky bit: there another user could swap the folder between the check and the use. A sticky `/tmp` or a per-user `TMPDIR` is safe.
 - **Windows**: `ssh host -- powershell -EncodedCommand <wrapper>`. The fixed wrapper reads the script from stdin as base64 lines (Windows OpenSSH never signals end of input, so a line holding `.` ends it), then runs it in a child PowerShell with UTF-8 output and an empty stdin, so programs such as git never wait for input.
 - **tmux**: each tmux call goes through ssh with every word quoted. `tmux_run` pastes the command between 2 printf markers and polls `capture-pane` until the end marker shows.
 - **desktop**: a daemon (`windows/fwd.cs`, built with the C# compiler that ships with Windows) runs in the logged-in session and listens on `127.0.0.1` only, behind a token readable by its owner. stick reaches it through an ssh tunnel.
