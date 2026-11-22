@@ -31,6 +31,7 @@ claude plugin install stick@zyx1121
 ## 限制
 
 - 不会在 bash 和 PowerShell 之间翻译。
+- 脚本存放在每个用户私有的 0700 文件夹（posix 为 `TMPDIR` 或 `/tmp` 下的 `stick-<uid>`，Windows 为 `%TEMP%\stick`），正常结束时删除；超时杀掉 runner 时，超过一天的文件会在之后的调用中清除。
 - Windows 主机没有 tmux。
 - 桌面 daemon 需要有人登录在控制台。
 
