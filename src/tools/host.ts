@@ -57,6 +57,14 @@ export function hostTools(run: Spawn, oses: OsCache, configPath?: string): Toolb
         const result = await execOn(run, host, os, command, cwd, (timeout_s ?? 120) * 1000);
         // ssh exits 255 for its own failures, but a script may also exit 255. The runner prints a marker first, so no marker means ssh never reached the host.
         if (host && result.code === 255 && !result.timedOut && !result.ran) return fail(classify(host, result));
+        // The runner exits 125 with a "stick:" line on stderr when it refuses its script folder. A script that exits 125 on its own does not print it first.
+        if (result.ran && result.code === 125 && result.stderr.startsWith("stick:")) {
+          return fail({
+            code: "runner_dir_unsafe",
+            message: result.stderr.trim(),
+            hint: "Set TMPDIR to a private folder for this user, or remove the stick-<uid> entry in the temp folder if you own it.",
+          });
+        }
         return ok(
           {
             os,

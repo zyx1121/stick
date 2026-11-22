@@ -92,12 +92,23 @@ test("posix runner refuses a symlinked folder", async () => {
     await mkdir(join(base, "other"));
     await symlink(join(base, "other"), join(base, `stick-${process.getuid!()}`));
     const { argv, stdin } = plan(undefined, "posix", "echo hi");
-    const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", env: { ...process.env, TMPDIR: base } });
+    const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: base } });
     await new Response(proc.stdout).text();
+    expect(await new Response(proc.stderr).text()).toBe(`stick: unsafe script folder ${join(base, `stick-${process.getuid!()}`)}\n`);
     expect(await proc.exited).toBe(125);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+});
+
+test("exec reports an unsafe runner folder, not a bare exit 125", async () => {
+  const mk = (stderr: string): Spawn => async (argv) =>
+    argv.at(-1) === "uname -s" ? { code: 0, stdout: "Linux\n", stderr: "", timedOut: false } : { code: 125, stdout: "stick:ran\n", stderr, timedOut: false };
+  const run = (spawnFn: Spawn) =>
+    new Map(allTools({ exec: spawnExec("x"), clock: realClock, spawn: spawnFn, oses: new OsCache(spawnFn, "linux") }).map((t) => [t.name, t])).get("exec")!.run({ host: "box", command: "x" });
+  const refused = await run(mk("stick: unsafe script folder /tmp/stick-1000\n"));
+  expect(refused.structuredContent.error).toMatchObject({ code: "runner_dir_unsafe", message: "stick: unsafe script folder /tmp/stick-1000" });
+  expect((await run(mk("own failure\n"))).structuredContent.data).toMatchObject({ exit_code: 125 });
 });
 
 test("powershellQuote doubles single quotes", () => {
