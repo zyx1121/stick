@@ -54,17 +54,33 @@ test("posix runner saves scripts in a private 0700 folder and sweeps old files",
   const dir = join(base, `stick-${process.getuid!()}`);
   try {
     await mkdir(dir, { mode: 0o755 });
-    const old = join(dir, "old.sh");
-    await writeFile(old, "x");
     const past = new Date(Date.now() - 2 * 86400_000);
-    await utimes(old, past, past);
+    await mkdir(join(dir, "cache"));
+    for (const name of ["run.old", "settings.json", "cache/run.nested"]) {
+      await writeFile(join(dir, name), "x");
+      await utimes(join(dir, name), past, past);
+    }
     const { argv, stdin } = plan(undefined, "posix", `echo $0; ls -ld ${posixQuote(dir)}`);
     const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", env: { ...process.env, TMPDIR: base } });
     const out = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     expect(out).toContain(`${dir}/run.`);
     expect(out).toContain("drwx------");
-    expect((await readdir(dir)).length).toBe(0);
+    expect((await readdir(dir)).sort()).toEqual(["cache", "settings.json"]);
+    expect(await readdir(join(dir, "cache"))).toEqual(["run.nested"]);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("posix runner runs the script with the caller's umask", async () => {
+  const base = await mkdtemp(join(tmpdir(), "stick-runner-"));
+  try {
+    const { stdin } = plan(undefined, "posix", "umask");
+    const proc = Bun.spawn(["sh", "-c", `umask 0022; ${"sh -c " + posixQuote(POSIX_RUNNER)}`], { stdin: new Blob([stdin]), stdout: "pipe", env: { ...process.env, TMPDIR: base } });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toBe("stick:ran\n0022\n");
   } finally {
     await rm(base, { recursive: true, force: true });
   }
