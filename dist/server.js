@@ -21803,6 +21803,9 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 
+// src/host/exec.ts
+import { randomUUID } from "crypto";
+
 // src/host/os.ts
 function collect(stream) {
   const chunks = [];
@@ -21887,20 +21890,25 @@ var WINDOWS_RUNNER = [
   `if($LASTEXITCODE){exit $LASTEXITCODE};if(-not $ok){exit 1};exit 0`
 ].join(";");
 var WINDOWS_OUTER = [
-  `$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
+  `$ProgressPreference="SilentlyContinue";$id=[Console]::In.ReadLine();$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
   `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
-  `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -Wait -PassThru -RedirectStandardInput $n`,
-  `Remove-Item $f,$n -Force;exit $p.ExitCode`
+  `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -PassThru -RedirectStandardInput $n`,
+  `$null=$p.Handle;$k=Join-Path $env:TEMP "stick-$id.pid";[IO.File]::WriteAllText($k,[string]$p.Id);$p.WaitForExit()`,
+  `Remove-Item $f,$n,$k -Force -ErrorAction SilentlyContinue;exit $p.ExitCode`
 ].join(";");
 var WINDOWS_COMMAND = `powershell -NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_OUTER)}`;
-function windowsStdin(script) {
+function windowsStdin(script, id) {
   const b64 = Buffer.from(script, "utf8").toString("base64");
-  return (b64.match(/.{1,76}/g) ?? []).join(`
+  return id + `
+` + (b64.match(/.{1,76}/g) ?? []).join(`
 `) + `
 .
 `;
+}
+function killScript(id) {
+  return `$k=Join-Path $env:TEMP 'stick-${id}.pid';if(Test-Path -LiteralPath $k){$t=(Get-Content -LiteralPath $k -Raw).Trim();taskkill /PID $t /T /F *>$null;Remove-Item -LiteralPath $k -Force -ErrorAction SilentlyContinue}`;
 }
 function posixQuote(word) {
   return `'${word.replaceAll("'", `'\\''`)}'`;
@@ -21910,13 +21918,13 @@ var POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 function powershellQuote(word) {
   return `'${word.replaceAll("'", "''")}'`;
 }
-function plan(host, os, command, cwd) {
+function plan(host, os, command, cwd, id = randomUUID().replaceAll("-", "")) {
   if (os === "windows") {
     const dir = cwd ? `Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(cwd, "utf8").toString("base64")}'))) -ErrorAction Stop
 ` : "";
     const script = dir + command;
     const argv = host ? [...SSH, host, "--", WINDOWS_COMMAND] : ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", WINDOWS_COMMAND.split(" ").at(-1)];
-    return { argv, stdin: windowsStdin(script) };
+    return { argv, stdin: windowsStdin(script, id) };
   }
   const script = (cwd ? `cd -- ${posixQuote(cwd)} || exit 1
 ` : "") + command + `
@@ -21932,9 +21940,14 @@ function cleanStderr(stderr) {
   return (rest + errors.join("")).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 async function execOn(run, host, os, command, cwd, timeoutMs) {
-  const { argv, stdin } = plan(host, os, command, cwd);
+  const id = randomUUID().replaceAll("-", "");
+  const { argv, stdin } = plan(host, os, command, cwd, id);
   const began = Date.now();
   const result = await run(argv, stdin, timeoutMs);
+  if (result.timedOut && os === "windows") {
+    const kill = plan(host, os, killScript(id), undefined, randomUUID().replaceAll("-", ""));
+    await run(kill.argv, kill.stdin, 20000).catch(() => {});
+  }
   const lf = (text) => os === "windows" ? text.replaceAll(`\r
 `, `
 `) : text;
@@ -23464,7 +23477,7 @@ function hostTools(run, oses, configPath) {
         exit_code: number2().nullable(),
         stdout: string2(),
         stderr: string2(),
-        timed_out: boolean2().describe("True when the timeout stopped the call. On Windows the remote program may still run."),
+        timed_out: boolean2().describe("True when the timeout stopped the call. On Windows stick then kills the remote program, but that can fail."),
         elapsed_ms: number2()
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
