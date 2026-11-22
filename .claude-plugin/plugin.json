@@ -1,0 +1,19 @@
+{
+  "name": "tmux",
+  "version": "0.1.0",
+  "description": "Drive tmux on this machine or any SSH host through MCP: run a command and get its output and exit code.",
+  "author": {
+    "name": "zyx1121",
+    "url": "https://github.com/zyx1121"
+  },
+  "repository": "https://github.com/zyx1121/tmux",
+  "license": "MIT",
+  "keywords": [
+    "tmux",
+    "ssh",
+    "terminal",
+    "mcp",
+    "codex",
+    "claude-code"
+  ]
+}
