@@ -2,11 +2,12 @@ import { afterAll, expect, test } from "bun:test";
 import { spawnExec } from "../src/tmux/exec.ts";
 import { realClock } from "../src/tmux/pane.ts";
 import { allTools } from "../src/tools/index.ts";
+import { OsCache } from "../src/host/os.ts";
 
 // A private tmux server on its own socket, so the tests never touch a real session.
 const socket = `tmux-mcp-test-${process.pid}`;
 const exec = spawnExec(socket);
-const tools = new Map(allTools(exec, realClock).map((tool) => [tool.name, tool]));
+const tools = new Map(allTools({ exec, clock: realClock, oses: new OsCache(undefined, "linux") }).map((tool) => [tool.name, tool]));
 const call = async (name: string, args: Record<string, unknown> = {}) => {
   const result = await tools.get(name)!.run(args);
   return { isError: result.isError, data: result.structuredContent.data as any, error: result.structuredContent.error as any };

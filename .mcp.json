@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "tmux": {
+    "stick": {
       "type": "stdio",
       "command": "bun",
       "args": [
