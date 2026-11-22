@@ -21894,7 +21894,8 @@ var WINDOWS_RUNNER = [
 var WINDOWS_OUTER = [
   `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$id=[Console]::In.ReadLine();$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
-  `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
+  `$d=Join-Path $env:TEMP "stick";$null=New-Item -ItemType Directory -Force -Path $d;Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue|?{$_.LastWriteTime -lt (Get-Date).AddDays(-1)}|Remove-Item -Force -ErrorAction SilentlyContinue`,
+  `$f=[IO.Path]::Combine($d,[Guid]::NewGuid().ToString("N")+".ps1");$n=[IO.Path]::Combine($d,[Guid]::NewGuid().ToString("N")+".in");[IO.File]::WriteAllBytes($n,[byte[]]@())`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
   `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -PassThru -RedirectStandardInput $n`,
   `$null=$p.Handle;$k=Join-Path $env:TEMP "stick-$id.pid";[IO.File]::WriteAllText($k,[string]$p.Id);$p.WaitForExit()`,
