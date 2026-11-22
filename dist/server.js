@@ -21877,6 +21877,8 @@ function utf16Base64(text) {
   }
   return Buffer.from(bytes).toString("base64");
 }
+var RAN_MARKER = `stick:ran
+`;
 var WINDOWS_RUNNER = [
   `$ErrorActionPreference="Continue";$ProgressPreference="SilentlyContinue";$env:WSL_UTF8="1"`,
   `$u=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$u;$OutputEncoding=$u`,
@@ -21887,7 +21889,7 @@ var WINDOWS_RUNNER = [
   `if($LASTEXITCODE){exit $LASTEXITCODE};if(-not $ok){exit 1};exit 0`
 ].join(";");
 var WINDOWS_OUTER = [
-  `$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
+  `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
   `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
@@ -21905,7 +21907,7 @@ function windowsStdin(script) {
 function posixQuote(word) {
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
-var POSIX_RUNNER = `f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` + `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
+var POSIX_RUNNER = `printf 'stick:ran\\n'; f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` + `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
 var POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 function powershellQuote(word) {
   return `'${word.replaceAll("'", "''")}'`;
@@ -21938,7 +21940,11 @@ async function execOn(run, host, os, command, cwd, timeoutMs) {
   const lf = (text) => os === "windows" ? text.replaceAll(`\r
 `, `
 `) : text;
-  return { ...result, stdout: lf(result.stdout), stderr: lf(cleanStderr(result.stderr)), elapsedMs: Date.now() - began };
+  let stdout = lf(result.stdout);
+  const ran = stdout.startsWith(RAN_MARKER);
+  if (ran)
+    stdout = stdout.slice(RAN_MARKER.length);
+  return { ...result, stdout, stderr: lf(cleanStderr(result.stderr)), ran, elapsedMs: Date.now() - began };
 }
 
 // src/desktop/client.ts
@@ -23430,7 +23436,6 @@ async function sshHosts(path = join2(homedir2(), ".ssh", "config"), seen = new S
 
 // src/tools/host.ts
 var MAX_CHARS = 20000;
-var SSH_FAILURE = /^(ssh: |kex_exchange|Connection (closed|reset|refused|timed out)|Permission denied \(|Host key verification failed|ssh_exchange)/m;
 var keepEnd = (text) => text.length <= MAX_CHARS ? text : text.slice(-MAX_CHARS);
 var hostInput = string2().regex(HOST_PATTERN, "A host is an SSH alias, user@host or address.").optional().describe("SSH host as in ~/.ssh/config, or user@host. Omit for this machine.");
 function hostTools(run, oses, configPath) {
@@ -23471,7 +23476,7 @@ function hostTools(run, oses, configPath) {
       async handler({ host, command, cwd, timeout_s }) {
         const os = await oses.of(host);
         const result = await execOn(run, host, os, command, cwd, (timeout_s ?? 120) * 1000);
-        if (host && result.code === 255 && !result.timedOut && SSH_FAILURE.test(result.stderr))
+        if (host && result.code === 255 && !result.timedOut && !result.ran)
           return fail(classify(host, result));
         return ok({
           os,

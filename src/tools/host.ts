@@ -7,7 +7,6 @@ import type { OsCache, Spawn } from "../host/os.ts";
 import { classify, HOST_PATTERN, TmuxError } from "../tmux/exec.ts";
 
 const MAX_CHARS = 20000;
-const SSH_FAILURE = /^(ssh: |kex_exchange|Connection (closed|reset|refused|timed out)|Permission denied \(|Host key verification failed|ssh_exchange)/m;
 const keepEnd = (text: string) => (text.length <= MAX_CHARS ? text : text.slice(-MAX_CHARS));
 
 export const hostInput = z
@@ -56,8 +55,8 @@ export function hostTools(run: Spawn, oses: OsCache, configPath?: string): Toolb
       async handler({ host, command, cwd, timeout_s }) {
         const os = await oses.of(host);
         const result = await execOn(run, host, os, command, cwd, (timeout_s ?? 120) * 1000);
-        // ssh exits 255 for its own failures, but a script may also exit 255. Only ssh writes these lines.
-        if (host && result.code === 255 && !result.timedOut && SSH_FAILURE.test(result.stderr)) return fail(classify(host, result));
+        // ssh exits 255 for its own failures, but a script may also exit 255. The runner prints a marker first, so no marker means ssh never reached the host.
+        if (host && result.code === 255 && !result.timedOut && !result.ran) return fail(classify(host, result));
         return ok(
           {
             os,

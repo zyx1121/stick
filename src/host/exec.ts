@@ -11,6 +11,13 @@ function utf16Base64(text: string): string {
 }
 
 /**
+ * Both runners print this line first, before any user code. When it is missing
+ * from stdout, the runner never started, so an exit 255 came from ssh itself
+ * and not from a script that exited 255 after its own inner ssh failed.
+ */
+export const RAN_MARKER = "stick:ran\n";
+
+/**
  * Runs the script saved at $env:STICK_SCRIPT. It switches every stream to
  * UTF-8, reports a parse error as text, passes native stderr through without
  * calling it a failure, and exits with the last native exit code, or 1 when a
@@ -35,7 +42,7 @@ const WINDOWS_RUNNER = [
  * ssh stdin that never closes.
  */
 const WINDOWS_OUTER = [
-  `$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
+  `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
   `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
@@ -61,7 +68,7 @@ export function posixQuote(word: string): string {
  * the lines of the script that follow it.
  */
 export const POSIX_RUNNER =
-  `f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` +
+  `printf 'stick:ran\\n'; f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` +
   `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
 const POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 
@@ -96,5 +103,8 @@ export async function execOn(run: Spawn, host: string | undefined, os: Os, comma
   const result = await run(argv, stdin, timeoutMs);
   // Windows ends lines with CRLF. Give every OS the same line endings.
   const lf = (text: string) => (os === "windows" ? text.replaceAll("\r\n", "\n") : text);
-  return { ...result, stdout: lf(result.stdout), stderr: lf(cleanStderr(result.stderr)), elapsedMs: Date.now() - began };
+  let stdout = lf(result.stdout);
+  const ran = stdout.startsWith(RAN_MARKER);
+  if (ran) stdout = stdout.slice(RAN_MARKER.length);
+  return { ...result, stdout, stderr: lf(cleanStderr(result.stderr)), ran, elapsedMs: Date.now() - began };
 }
