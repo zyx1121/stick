@@ -57,6 +57,7 @@ The plugin needs Bun on this machine and key-based ssh to each host. tmux tools 
 
 - Every tool takes `host`. Omit it for this machine.
 - Every result is an envelope: `data` on success, or `error` with a `code` and a `hint`.
+- On Windows the exit code is the last native program's code, or 1 when PowerShell wrote an error. Each Windows call costs about 1 s more than a posix one.
 - `exec` stops the local ssh at `timeout_s`. On Windows the remote program can keep running, so use a scheduled task or WSL tmux for long jobs there.
 
 ## Configuration
@@ -69,8 +70,8 @@ SSH settings come from `~/.ssh/config`. Turn on connection sharing there (`Contr
 
 ## How it works
 
-- **posix**: `ssh host -- sh -c '... exec bash -s'`, with the script on stdin.
-- **Windows**: `ssh host -- powershell -EncodedCommand <wrapper>`. The fixed wrapper switches output to UTF-8, reads the script from stdin as base64 lines, runs it, and exits with its code. Windows OpenSSH never signals end of input, so a line holding `.` ends the script.
+- **posix**: `ssh host -- sh -c '...'` saves the script from stdin to a temp file, then runs it with bash and stdin on `/dev/null`.
+- **Windows**: `ssh host -- powershell -EncodedCommand <wrapper>`. The fixed wrapper reads the script from stdin as base64 lines (Windows OpenSSH never signals end of input, so a line holding `.` ends it), then runs it in a child PowerShell with UTF-8 output and an empty stdin, so programs such as git never wait for input.
 - **tmux**: each tmux call goes through ssh with every word quoted. `tmux_run` pastes the command between 2 printf markers and polls `capture-pane` until the end marker shows.
 - **desktop**: a daemon (`windows/fwd.cs`, built with the C# compiler that ships with Windows) runs in the logged-in session and listens on `127.0.0.1` only, behind a token readable by its owner. stick reaches it through an ssh tunnel.
 

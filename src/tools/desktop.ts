@@ -52,16 +52,22 @@ export function desktopTools(run: Spawn, oses: OsCache, desktop: Desktop): Toolb
     defineTool({
       name: "desktop_install",
       description:
-        "Install or update the desktop daemon on a Windows host: copy its source, build it with the C# compiler that ships with Windows, and start it at every logon of the ssh user. The user must be an administrator and logged in at the desktop.",
+        "Install or update the desktop daemon on a Windows host: copy its source, build it with the C# compiler that ships with Windows, and start it at every logon of the ssh user. The user must be an administrator and logged in at the desktop. It replaces a running daemon and issues a new token. Its folder is readable by SYSTEM and Administrators only.",
       inputSchema: { host: windowsHost },
       data: z.looseObject({ output: z.string() }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       async handler({ host }) {
         const wrong = await requireWindows(host);
         if (wrong) return wrong;
         const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
         const script = [
-          `$src = Join-Path ${powershellQuote(DAEMON_ROOT)} 'src'`,
+          `$root = ${powershellQuote(DAEMON_ROOT)}`,
+          // Lock the folder before any file lands in it. install.ps1 repeats this for older installs.
+          `New-Item -ItemType Directory -Force -Path $root | Out-Null`,
+          `icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null`,
+          `icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null`,
+          `icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null`,
+          `$src = Join-Path $root 'src'`,
           `New-Item -ItemType Directory -Force -Path $src | Out-Null`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'fwd.cs'), [Convert]::FromBase64String('${b64(daemonSource)}'))`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'install.ps1'), [Convert]::FromBase64String('${b64(installer)}'))`,

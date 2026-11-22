@@ -2,9 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { localPort } from "../src/desktop/client.ts";
 import { sshHosts } from "../src/host/config.ts";
-import { cleanStderr, plan, powershellQuote, WINDOWS_COMMAND, windowsStdin } from "../src/host/exec.ts";
+import { cleanStderr, plan, POSIX_RUNNER, posixQuote, powershellQuote, WINDOWS_COMMAND, windowsStdin } from "../src/host/exec.ts";
 import { OsCache, spawn, type Spawn } from "../src/host/os.ts";
 import { realClock } from "../src/tmux/pane.ts";
 import { spawnExec } from "../src/tmux/exec.ts";
@@ -12,7 +11,8 @@ import { allTools } from "../src/tools/index.ts";
 
 test("windows plan: fixed ASCII command line, script as base64 lines on stdin", () => {
   const script = `Get-Item "C:\\Users\\a b"; "中文 'q' \`"x\`""`;
-  const { argv, stdin } = plan("win", "windows", script, "C:\\it's here");
+  const cwd = "C:\\it's \u2019here\u2019; calc #";
+  const { argv, stdin } = plan("win", "windows", script, cwd);
   expect(argv.at(-1)).toBe(WINDOWS_COMMAND);
   expect(WINDOWS_COMMAND).toMatch(/^powershell -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/);
   expect(WINDOWS_COMMAND.length).toBeLessThan(8000);
@@ -20,15 +20,17 @@ test("windows plan: fixed ASCII command line, script as base64 lines on stdin", 
   expect(lines.at(-1)).toBe(".");
   expect(lines.slice(0, -1).every((line) => line.length <= 76)).toBe(true);
   const decoded = Buffer.from(lines.slice(0, -1).join(""), "base64").toString("utf8");
-  expect(decoded).toBe(`Set-Location -LiteralPath 'C:\\it''s here' -ErrorAction Stop\n${script}`);
+  const b64 = Buffer.from(cwd, "utf8").toString("base64");
+  expect(decoded).toBe(`Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))) -ErrorAction Stop\n${script}`);
+  expect(b64).toMatch(/^[A-Za-z0-9+/=]+$/);
   expect(windowsStdin("")).toBe("\n.\n");
 });
 
-test("posix plan: the script goes to bash -s on stdin, cwd quoted", () => {
+test("posix plan: the script goes on stdin to a runner that saves it first, cwd quoted", () => {
   const { argv, stdin } = plan("box", "posix", "echo hi", "/tmp/it's");
-  expect(argv.slice(-2)).toEqual(["--", `sh -c 'command -v bash >/dev/null 2>&1 && exec bash -s || exec sh -s'`]);
+  expect(argv.slice(-2)).toEqual(["--", `sh -c ${posixQuote(POSIX_RUNNER)}`]);
   expect(stdin).toBe(`cd -- '/tmp/it'\\''s' || exit 1\necho hi\n`);
-  expect(plan(undefined, "posix", "x").argv).toEqual(["bash", "-s"]);
+  expect(plan(undefined, "posix", "x").argv).toEqual(["sh", "-c", POSIX_RUNNER]);
 });
 
 test("powershellQuote doubles single quotes", () => {
@@ -73,12 +75,6 @@ test("sshHosts reads Host lines, follows Include and skips patterns", async () =
   }
 });
 
-test("localPort is stable and out of the fw CLI's way", () => {
-  expect(localPort("furnace")).toBe(localPort("furnace"));
-  expect(localPort("furnace")).toBeGreaterThanOrEqual(29000);
-  expect(localPort("furnace")).toBeLessThan(30000);
-});
-
 const tools = new Map(allTools({ exec: spawnExec(`stick-host-${process.pid}`), clock: realClock, spawn, oses: new OsCache(spawn, "linux") }).map((t) => [t.name, t]));
 const call = async (name: string, args: Record<string, unknown>) => {
   const r = await tools.get(name)!.run(args);
@@ -90,6 +86,9 @@ test("exec runs a local bash script: quoting, stderr, exit code, cwd and timeout
   expect(run.data).toMatchObject({ os: "posix", exit_code: 3, stdout: `a "b" $HOME 中文\n`, stderr: "oops\n", timed_out: false });
   expect((await call("exec", { command: "pwd", cwd: "/tmp" })).data.stdout).toMatch(/tmp\n$/);
   expect((await call("exec", { command: "true", cwd: "/no/such/dir" })).data.exit_code).toBe(1);
+  // A command that reads stdin must not eat the lines after it.
+  expect((await call("exec", { command: "cat >/dev/null\nread x; echo got=$x\necho SECOND" })).data).toMatchObject({ exit_code: 0, stdout: "got=\nSECOND\n" });
+  expect((await call("exec", { command: "exit 255" })).data.exit_code).toBe(255);
   const slow = await call("exec", { command: "sleep 5", timeout_s: 1 });
   expect(slow.data).toMatchObject({ timed_out: true, exit_code: null });
 });

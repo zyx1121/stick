@@ -21799,8 +21799,8 @@ function busyError(pane) {
 }
 
 // src/desktop/client.ts
-import { mkdir } from "fs/promises";
-import { homedir, tmpdir } from "os";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { homedir } from "os";
 import { join } from "path";
 
 // src/host/os.ts
@@ -21855,6 +21855,8 @@ class OsCache {
       os = "windows";
     else {
       const uname = await this.run([...SSH, host, "--", "uname -s"], undefined, 20000);
+      if (uname.code === 255 || uname.timedOut)
+        throw new TmuxError(classify(host, { ...uname, code: 255 }));
       os = uname.code === 0 && uname.stdout.trim() ? "posix" : "windows";
     }
     this.known.set(host, os);
@@ -21866,16 +21868,6 @@ class OsCache {
 }
 
 // src/host/exec.ts
-var WINDOWS_WRAPPER = [
-  `$ErrorActionPreference="Continue";$ProgressPreference="SilentlyContinue";$env:WSL_UTF8="1"`,
-  `$u=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$u;$OutputEncoding=$u`,
-  `$b=[Text.StringBuilder]::new();while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
-  `$src=$u.GetString([Convert]::FromBase64String($b.ToString()))`,
-  `try{$sb=[ScriptBlock]::Create($src)}catch{[Console]::Error.WriteLine($_.Exception.InnerException.Message);exit 254}`,
-  `$global:LASTEXITCODE=0;$ok=$true`,
-  `& $sb 2>&1|%{if($_ -is [Management.Automation.ErrorRecord]){$ok=$false;[Console]::Error.WriteLine($_.ToString())}else{$_|Out-String -Stream -Width 4096}}`,
-  `if($LASTEXITCODE){exit $LASTEXITCODE};if(-not $ok){exit 1};exit 0`
-].join(";");
 function utf16Base64(text) {
   const bytes = new Uint8Array(text.length * 2);
   for (let i = 0;i < text.length; i++) {
@@ -21885,7 +21877,24 @@ function utf16Base64(text) {
   }
   return Buffer.from(bytes).toString("base64");
 }
-var WINDOWS_COMMAND = `powershell -NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_WRAPPER)}`;
+var WINDOWS_RUNNER = [
+  `$ErrorActionPreference="Continue";$ProgressPreference="SilentlyContinue";$env:WSL_UTF8="1"`,
+  `$u=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$u;$OutputEncoding=$u`,
+  `$src=[IO.File]::ReadAllText($env:STICK_SCRIPT,$u)`,
+  `try{$sb=[ScriptBlock]::Create($src)}catch{$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};[Console]::Error.WriteLine($e.Message);exit 254}`,
+  `$global:LASTEXITCODE=0;$ok=$true`,
+  `& $sb 2>&1|%{if($_ -is [Management.Automation.ErrorRecord]){if($_.FullyQualifiedErrorId -notlike "NativeCommandError*"){$ok=$false};[Console]::Error.WriteLine($_.ToString())}else{$_|Out-String -Stream -Width 4096}}`,
+  `if($LASTEXITCODE){exit $LASTEXITCODE};if(-not $ok){exit 1};exit 0`
+].join(";");
+var WINDOWS_OUTER = [
+  `$ProgressPreference="SilentlyContinue";$b=[Text.StringBuilder]::new()`,
+  `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
+  `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
+  `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
+  `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -Wait -PassThru -RedirectStandardInput $n`,
+  `Remove-Item $f,$n -Force;exit $p.ExitCode`
+].join(";");
+var WINDOWS_COMMAND = `powershell -NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_OUTER)}`;
 function windowsStdin(script) {
   const b64 = Buffer.from(script, "utf8").toString("base64");
   return (b64.match(/.{1,76}/g) ?? []).join(`
@@ -21893,24 +21902,26 @@ function windowsStdin(script) {
 .
 `;
 }
-var POSIX_COMMAND = `sh -c 'command -v bash >/dev/null 2>&1 && exec bash -s || exec sh -s'`;
 function posixQuote(word) {
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
+var POSIX_RUNNER = `f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` + `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
+var POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 function powershellQuote(word) {
   return `'${word.replaceAll("'", "''")}'`;
 }
 function plan(host, os, command, cwd) {
   if (os === "windows") {
-    const script = (cwd ? `Set-Location -LiteralPath ${powershellQuote(cwd)} -ErrorAction Stop
-` : "") + command;
+    const dir = cwd ? `Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(cwd, "utf8").toString("base64")}'))) -ErrorAction Stop
+` : "";
+    const script = dir + command;
     const argv = host ? [...SSH, host, "--", WINDOWS_COMMAND] : ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", WINDOWS_COMMAND.split(" ").at(-1)];
     return { argv, stdin: windowsStdin(script) };
   }
   const script = (cwd ? `cd -- ${posixQuote(cwd)} || exit 1
 ` : "") + command + `
 `;
-  return { argv: host ? [...SSH, host, "--", POSIX_COMMAND] : ["bash", "-s"], stdin: script };
+  return { argv: host ? [...SSH, host, "--", POSIX_COMMAND] : ["sh", "-c", POSIX_RUNNER], stdin: script };
 }
 function cleanStderr(stderr) {
   if (!stderr.includes("#< CLIXML"))
@@ -21933,11 +21944,11 @@ async function execOn(run, host, os, command, cwd, timeoutMs) {
 // src/desktop/client.ts
 var DAEMON_ROOT = "C:\\dev\\fw";
 var DAEMON_PORT = 9877;
-function localPort(host) {
-  let hash = 0;
-  for (const ch of host)
-    hash = hash * 31 + ch.charCodeAt(0) >>> 0;
-  return 29000 + hash % 1000;
+async function freePort() {
+  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const port = server.port;
+  server.stop(true);
+  return port;
 }
 
 class Desktop {
@@ -21945,6 +21956,7 @@ class Desktop {
   fetchFn;
   tokens = new Map;
   socketDir = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "stick");
+  ports = new Map;
   constructor(run, fetchFn = fetch) {
     this.run = run;
     this.fetchFn = fetchFn;
@@ -21953,18 +21965,43 @@ class Desktop {
     return join(this.socketDir, `${host}.desktop.sock`);
   }
   async tunnel(host, fresh = false) {
-    await mkdir(this.socketDir, { recursive: true });
+    await mkdir(this.socketDir, { recursive: true, mode: 448 });
     const sock = this.socket(host);
+    const portFile = `${sock}.port`;
     if (fresh)
       await this.run(["ssh", "-S", sock, "-O", "exit", host], undefined, 5000);
     const check = await this.run(["ssh", "-S", sock, "-O", "check", host], undefined, 5000);
-    if (check.code === 0)
-      return;
-    const port = localPort(host);
-    const open = await this.run([...SSH, "-fN", "-M", "-S", sock, "-o", "ControlPersist=30m", "-o", "ExitOnForwardFailure=yes", "-L", `${port}:127.0.0.1:${DAEMON_PORT}`, host], undefined, 20000);
+    if (check.code === 0) {
+      const saved = Number(await readFile(portFile, "utf8").catch(() => ""));
+      if (saved > 0) {
+        this.ports.set(host, saved);
+        return saved;
+      }
+      await this.run(["ssh", "-S", sock, "-O", "exit", host], undefined, 5000);
+    }
+    const port = await freePort();
+    const open = await this.run([
+      ...SSH,
+      "-fN",
+      "-M",
+      "-S",
+      sock,
+      "-o",
+      "ControlPersist=30m",
+      "-o",
+      "ExitOnForwardFailure=yes",
+      "-o",
+      "GatewayPorts=no",
+      "-L",
+      `127.0.0.1:${port}:127.0.0.1:${DAEMON_PORT}`,
+      host
+    ], undefined, 20000);
     if (open.code !== 0) {
       throw new TmuxError({ code: "unreachable", message: `Could not open the desktop tunnel to ${host}.`, why: open.stderr.trim(), hint: `Check that \`ssh ${host}\` works.` });
     }
+    await writeFile(portFile, String(port), { mode: 384 });
+    this.ports.set(host, port);
+    return port;
   }
   async token(host, fresh = false) {
     if (!fresh && this.tokens.has(host))
@@ -21978,10 +22015,11 @@ class Desktop {
     return token;
   }
   async post(host, script, force, token) {
+    const port = this.ports.get(host);
     const headers = { "X-Fw-Token": token };
     if (force)
       headers["X-Fw-Force"] = "1";
-    const res = await this.fetchFn(`http://127.0.0.1:${localPort(host)}/run`, { method: "POST", headers, body: script, signal: AbortSignal.timeout(300000) });
+    const res = await this.fetchFn(`http://127.0.0.1:${port}/run`, { method: "POST", headers, body: script, signal: AbortSignal.timeout(300000) });
     return { status: res.status, text: await res.text() };
   }
   async send(host, script, force) {
@@ -22005,10 +22043,10 @@ class Desktop {
     const files = [];
     const names = new Set(answer.text.match(/(shot|rec)-\d+-\d+\.(jpg|mp4)/g) ?? []);
     if (names.size && !/^\s*log\b/.test(script)) {
-      const dir = join(tmpdir(), "stick", host);
-      await mkdir(dir, { recursive: true });
+      const dir = join(this.socketDir, "shots", host);
+      await mkdir(dir, { recursive: true, mode: 448 });
       for (const name of names) {
-        const res = await this.fetchFn(`http://127.0.0.1:${localPort(host)}/file?name=${name}`, { headers: { "X-Fw-Token": token } });
+        const res = await this.fetchFn(`http://127.0.0.1:${this.ports.get(host)}/file?name=${name}`, { headers: { "X-Fw-Token": token } });
         if (!res.ok)
           continue;
         const path = join(dir, name);
@@ -23189,6 +23227,17 @@ $ErrorActionPreference = 'Stop'
 $root = 'C:\\dev\\fw'
 $fx = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319'
 
+# The daemon runs with the user's full rights. Only SYSTEM and Administrators
+# may touch its folder, so a process of the same user without elevation (or
+# another user) cannot read the token, swap fwd.exe or read screenshots.
+# Administrators also own it, so the user cannot reopen the ACL as owner.
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+# The grant goes on the folder only; everything inside is reset to inherit it.
+# (OI)(CI) on a file is not valid and would leave the file with an empty ACL.
+icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
+icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null
+
 Stop-ScheduledTask -TaskName fw -ErrorAction SilentlyContinue
 Get-Process fwd -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 800
@@ -23198,14 +23247,10 @@ Start-Sleep -Milliseconds 800
     /r:System.Windows.Forms.dll /r:System.Drawing.dll "$root\\src\\fwd.cs"
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 
-$token = "$root\\token"
-if (-not (Test-Path $token)) {
-    $bytes = New-Object byte[] 24
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    [IO.File]::WriteAllText($token, (($bytes | ForEach-Object { $_.ToString('x2') }) -join ''))
-}
-# Only this user, SYSTEM and Administrators may read the token.
-icacls $token /inheritance:r /grant:r "\${env:USERNAME}:R" 'SYSTEM:F' 'Administrators:F' | Out-Null
+# A new token on every install: a token file that already exists may have been planted.
+$bytes = New-Object byte[] 24
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+[IO.File]::WriteAllText("$root\\token", (($bytes | ForEach-Object { $_.ToString('x2') }) -join ''))
 
 $action = New-ScheduledTaskAction -Execute "$root\\fwd.exe"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -23261,17 +23306,22 @@ ${COMMANDS}`,
     }),
     defineTool({
       name: "desktop_install",
-      description: "Install or update the desktop daemon on a Windows host: copy its source, build it with the C# compiler that ships with Windows, and start it at every logon of the ssh user. The user must be an administrator and logged in at the desktop.",
+      description: "Install or update the desktop daemon on a Windows host: copy its source, build it with the C# compiler that ships with Windows, and start it at every logon of the ssh user. The user must be an administrator and logged in at the desktop. It replaces a running daemon and issues a new token. Its folder is readable by SYSTEM and Administrators only.",
       inputSchema: { host: windowsHost },
       data: looseObject({ output: string2() }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       async handler({ host }) {
         const wrong = await requireWindows(host);
         if (wrong)
           return wrong;
         const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
         const script = [
-          `$src = Join-Path ${powershellQuote(DAEMON_ROOT)} 'src'`,
+          `$root = ${powershellQuote(DAEMON_ROOT)}`,
+          `New-Item -ItemType Directory -Force -Path $root | Out-Null`,
+          `icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null`,
+          `icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null`,
+          `icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null`,
+          `$src = Join-Path $root 'src'`,
           `New-Item -ItemType Directory -Force -Path $src | Out-Null`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'fwd.cs'), [Convert]::FromBase64String('${b64(fwd_default)}'))`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'install.ps1'), [Convert]::FromBase64String('${b64(install_default)}'))`,
@@ -23290,7 +23340,7 @@ ${COMMANDS}`,
 }
 
 // src/host/config.ts
-import { readFile } from "fs/promises";
+import { readFile as readFile2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join2 } from "path";
 async function sshHosts(path = join2(homedir2(), ".ssh", "config"), seen = new Set) {
@@ -23299,7 +23349,7 @@ async function sshHosts(path = join2(homedir2(), ".ssh", "config"), seen = new S
   seen.add(path);
   let text;
   try {
-    text = await readFile(path, "utf8");
+    text = await readFile2(path, "utf8");
   } catch {
     return [];
   }
@@ -23327,6 +23377,7 @@ async function sshHosts(path = join2(homedir2(), ".ssh", "config"), seen = new S
 
 // src/tools/host.ts
 var MAX_CHARS = 20000;
+var SSH_FAILURE = /^(ssh: |kex_exchange|Connection (closed|reset|refused|timed out)|Permission denied \(|Host key verification failed|ssh_exchange)/m;
 var keepEnd = (text) => text.length <= MAX_CHARS ? text : text.slice(-MAX_CHARS);
 var hostInput = string2().regex(HOST_PATTERN, "A host is an SSH alias, user@host or address.").optional().describe("SSH host as in ~/.ssh/config, or user@host. Omit for this machine.");
 function hostTools(run, oses, configPath) {
@@ -23367,7 +23418,7 @@ function hostTools(run, oses, configPath) {
       async handler({ host, command, cwd, timeout_s }) {
         const os = await oses.of(host);
         const result = await execOn(run, host, os, command, cwd, (timeout_s ?? 120) * 1000);
-        if (host && result.code === 255 && !result.timedOut)
+        if (host && result.code === 255 && !result.timedOut && SSH_FAILURE.test(result.stderr))
           return fail(classify(host, result));
         return ok({
           os,
@@ -23496,11 +23547,18 @@ function tmuxTools(exec, clock, oses) {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       async handler({ host: h, target: t, command, timeout_s }) {
         await requirePosix(oses, h);
-        const pane = await paneInfo(exec, h, t);
+        let pane = await paneInfo(exec, h, t);
         if (pane.dead)
           return fail({ code: "dead", message: `Pane ${pane.target} has exited.`, hint: "Start a new session with tmux_new." });
         if (pane.in_mode)
           await tmux(exec, h, ["send-keys", "-X", "-t", pane.pane_id, "cancel"]);
+        if (!isShell(pane.command)) {
+          const id = pane.pane_id;
+          pane = await poll(clock, 1000, async () => {
+            const now = await paneInfo(exec, h, id);
+            return isShell(now.command) ? now : undefined;
+          }) ?? pane;
+        }
         if (!isShell(pane.command))
           throw busyError(pane);
         const id = newRunId();

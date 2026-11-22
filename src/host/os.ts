@@ -49,6 +49,8 @@ export class OsCache {
     if (probe.stdout.trim() === "Windows_NT") os = "windows";
     else {
       const uname = await this.run([...SSH, host, "--", "uname -s"], undefined, 20000);
+      // A dropped connection says nothing about the OS: do not remember a guess.
+      if (uname.code === 255 || uname.timedOut) throw new TmuxError(classify(host, { ...uname, code: 255 }));
       os = uname.code === 0 && uname.stdout.trim() ? "posix" : "windows";
     }
     this.known.set(host, os);

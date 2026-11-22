@@ -11,7 +11,7 @@ Claude Code and Codex plugin: a Bun MCP server (`src/`, bundled to `dist/server.
 
 ## Rules
 
-- A command never travels in the ssh argv. Posix scripts go to `bash -s` on stdin. Windows scripts go on stdin as base64 lines to the fixed PowerShell wrapper in `src/host/exec.ts`, which is sent as `-EncodedCommand`. Keep the wrapper ASCII and under cmd's 8191 character limit.
+- A command never travels in the ssh argv. Posix scripts go on stdin to `POSIX_RUNNER`, which saves them to a temp file and runs them with stdin on `/dev/null`, so a command that reads stdin cannot eat the next lines. Windows scripts go on stdin as base64 lines to the fixed PowerShell wrapper in `src/host/exec.ts`, which is sent as `-EncodedCommand`. Keep the wrapper ASCII and under cmd's 8191 character limit. The script itself runs in a child PowerShell whose stdin is an empty file, so native programs never wait on the ssh stdin.
 - Windows OpenSSH does not pass end of input to the program. The wrapper stops reading at a line holding `.`. Do not switch it to `ReadToEnd`.
 - tmux arguments go through `shellQuote`. Text typed into a pane goes through `load-buffer` and `paste-buffer -p`, never through `send-keys -l`.
 - A `host` must match `HOST_PATTERN`, so it can never become an ssh option.

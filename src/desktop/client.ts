@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { TmuxError } from "../tmux/exec.ts";
 import { execOn } from "../host/exec.ts";
@@ -10,11 +10,12 @@ import { SSH } from "../host/os.ts";
 export const DAEMON_ROOT = "C:\\dev\\fw";
 const DAEMON_PORT = 9877;
 
-/** A local port per host, away from the fw CLI's 19877, stable across restarts. */
-export function localPort(host: string): number {
-  let hash = 0;
-  for (const ch of host) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return 29000 + (hash % 1000);
+/** Ask the kernel for a free local port. */
+async function freePort(): Promise<number> {
+  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const port = server.port;
+  server.stop(true);
+  return port;
 }
 
 export interface DesktopReply {
@@ -26,6 +27,7 @@ export interface DesktopReply {
 export class Desktop {
   private tokens = new Map<string, string>();
   private socketDir = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "stick");
+  private ports = new Map<string, number>();
 
   constructor(private run: Spawn, private fetchFn: typeof fetch = fetch) {}
 
@@ -33,21 +35,40 @@ export class Desktop {
     return join(this.socketDir, `${host}.desktop.sock`);
   }
 
-  private async tunnel(host: string, fresh = false) {
-    await mkdir(this.socketDir, { recursive: true });
+  /**
+   * One ssh master per host forwards a free local port to the daemon. The
+   * listen side is pinned to 127.0.0.1 with GatewayPorts off, so a user's ssh
+   * config cannot open it to the network, and a port someone else already
+   * holds makes ssh fail instead of quietly binding another address. The port
+   * is saved next to the socket, so a restarted server finds the live tunnel.
+   */
+  private async tunnel(host: string, fresh = false): Promise<number> {
+    await mkdir(this.socketDir, { recursive: true, mode: 0o700 });
     const sock = this.socket(host);
+    const portFile = `${sock}.port`;
     if (fresh) await this.run(["ssh", "-S", sock, "-O", "exit", host], undefined, 5000);
     const check = await this.run(["ssh", "-S", sock, "-O", "check", host], undefined, 5000);
-    if (check.code === 0) return;
-    const port = localPort(host);
+    if (check.code === 0) {
+      const saved = Number(await readFile(portFile, "utf8").catch(() => ""));
+      if (saved > 0) {
+        this.ports.set(host, saved);
+        return saved;
+      }
+      await this.run(["ssh", "-S", sock, "-O", "exit", host], undefined, 5000);
+    }
+    const port = await freePort();
     const open = await this.run(
-      [...SSH, "-fN", "-M", "-S", sock, "-o", "ControlPersist=30m", "-o", "ExitOnForwardFailure=yes", "-L", `${port}:127.0.0.1:${DAEMON_PORT}`, host],
+      [...SSH, "-fN", "-M", "-S", sock, "-o", "ControlPersist=30m", "-o", "ExitOnForwardFailure=yes", "-o", "GatewayPorts=no",
+        "-L", `127.0.0.1:${port}:127.0.0.1:${DAEMON_PORT}`, host],
       undefined,
       20000,
     );
     if (open.code !== 0) {
       throw new TmuxError({ code: "unreachable", message: `Could not open the desktop tunnel to ${host}.`, why: open.stderr.trim(), hint: `Check that \`ssh ${host}\` works.` });
     }
+    await writeFile(portFile, String(port), { mode: 0o600 });
+    this.ports.set(host, port);
+    return port;
   }
 
   private async token(host: string, fresh = false): Promise<string> {
@@ -62,9 +83,10 @@ export class Desktop {
   }
 
   private async post(host: string, script: string, force: boolean, token: string) {
+    const port = this.ports.get(host);
     const headers: Record<string, string> = { "X-Fw-Token": token };
     if (force) headers["X-Fw-Force"] = "1";
-    const res = await this.fetchFn(`http://127.0.0.1:${localPort(host)}/run`, { method: "POST", headers, body: script, signal: AbortSignal.timeout(300000) });
+    const res = await this.fetchFn(`http://127.0.0.1:${port}/run`, { method: "POST", headers, body: script, signal: AbortSignal.timeout(300000) });
     return { status: res.status, text: await res.text() };
   }
 
@@ -91,10 +113,11 @@ export class Desktop {
     const files: string[] = [];
     const names = new Set(answer.text.match(/(shot|rec)-\d+-\d+\.(jpg|mp4)/g) ?? []);
     if (names.size && !/^\s*log\b/.test(script)) {
-      const dir = join(tmpdir(), "stick", host);
-      await mkdir(dir, { recursive: true });
+      // Under the user's cache with mode 0700, not a shared temp folder that other users can list.
+      const dir = join(this.socketDir, "shots", host);
+      await mkdir(dir, { recursive: true, mode: 0o700 });
       for (const name of names) {
-        const res = await this.fetchFn(`http://127.0.0.1:${localPort(host)}/file?name=${name}`, { headers: { "X-Fw-Token": token } });
+        const res = await this.fetchFn(`http://127.0.0.1:${this.ports.get(host)}/file?name=${name}`, { headers: { "X-Fw-Token": token } });
         if (!res.ok) continue;
         const path = join(dir, name);
         await Bun.write(path, await res.arrayBuffer());

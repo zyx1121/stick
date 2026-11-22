@@ -121,9 +121,17 @@ export function tmuxTools(exec: Exec, clock: Clock, oses: OsCache): ToolboxTool[
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       async handler({ host: h, target: t, command, timeout_s }) {
         await requirePosix(oses, h);
-        const pane = await paneInfo(exec, h, t);
+        let pane = await paneInfo(exec, h, t);
         if (pane.dead) return fail({ code: "dead", message: `Pane ${pane.target} has exited.`, hint: "Start a new session with tmux_new." });
         if (pane.in_mode) await tmux(exec, h, ["send-keys", "-X", "-t", pane.pane_id, "cancel"]);
+        // A program stopped a moment ago (C-c) can take a few hundred ms to hand the pane back to the shell.
+        if (!isShell(pane.command)) {
+          const id = pane.pane_id;
+          pane = (await poll(clock, 1000, async () => {
+            const now = await paneInfo(exec, h, id);
+            return isShell(now.command) ? now : undefined;
+          })) ?? pane;
+        }
         if (!isShell(pane.command)) throw busyError(pane);
         const id = newRunId();
         await pasteAndEnter(exec, h, pane.pane_id, wrapCommand(id, command));

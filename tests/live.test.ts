@@ -39,7 +39,7 @@ test("new, run, wait, send, read, list and kill against a real tmux", async () =
   const quoted = await call("tmux_run", { target: pane, command: `echo 'single' "double" {a,b} $((1+2)) '#{x}'` });
   expect(quoted.data.output).toBe("single double a b 3 #{x}");
 
-  const slow = await call("tmux_run", { target: pane, command: "sleep 2; echo late", timeout_s: 1 });
+  const slow = await call("tmux_run", { target: pane, command: "sleep 4; echo late", timeout_s: 1 });
   expect(slow.data).toMatchObject({ done: false, exit_code: null });
   expect((await call("tmux_run", { target: pane, command: "echo no" })).error).toMatchObject({ code: "busy" });
   const waited = await call("tmux_wait", { target: pane, run_id: slow.data.run_id, timeout_s: 10 });
