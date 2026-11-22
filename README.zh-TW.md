@@ -53,6 +53,8 @@ claude plugin install stick@zyx1121
 - Windows 主機沒有 tmux，要用 WSL 請透過它自己的 ssh 主機。
 - 桌面 daemon 需要有人登入在主控台。
 
+- 腳本存放在每位使用者私有的 0700 資料夾（posix 為 `TMPDIR` 或 `/tmp` 下的 `stick-<uid>`，Windows 為 `%TEMP%\stick`），正常結束時刪除；逾時殺掉 runner 時，超過一天的檔案會在之後的呼叫中清除。
+
 ## 授權
 
 [MIT](LICENSE)

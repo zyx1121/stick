@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir, utimes, readdir, symlink } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, utimes, readdir, symlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sshHosts } from "../src/host/config.ts";
@@ -184,6 +184,25 @@ test("exec runs a local bash script: quoting, stderr, exit code, cwd and timeout
   expect((await call("exec", { command: "exit 255" })).data.exit_code).toBe(255);
   const slow = await call("exec", { command: "sleep 5", timeout_s: 1 });
   expect(slow.data).toMatchObject({ timed_out: true, exit_code: null });
+});
+
+test("exec timeout leaves a 0700 folder and the next call sweeps a file two days old", async () => {
+  const base = await mkdtemp(join(tmpdir(), "stick-sweep-"));
+  const dir = join(base, `stick-${process.getuid!()}`);
+  const inBase: Spawn = (argv, stdin, timeoutMs) => spawn(["env", `TMPDIR=${base}`, ...argv], stdin, timeoutMs);
+  try {
+    const slow = await execOn(inBase, undefined, "posix", "sleep 30", undefined, 1000);
+    expect(slow.timedOut).toBe(true);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    const old = join(dir, "run.abcdef");
+    await writeFile(old, "x");
+    const past = new Date(Date.now() - 2 * 86400_000);
+    await utimes(old, past, past);
+    expect(await execOn(inBase, undefined, "posix", "true", undefined, 10000)).toMatchObject({ code: 0 });
+    expect(await readdir(dir)).not.toContain("run.abcdef");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("exec tells a script that exits 255 from an ssh failure by the runner marker", async () => {
