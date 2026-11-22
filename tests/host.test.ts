@@ -109,6 +109,20 @@ test("exec runs a local bash script: quoting, stderr, exit code, cwd and timeout
   expect(slow.data).toMatchObject({ timed_out: true, exit_code: null });
 });
 
+test("exec tells a script that exits 255 from an ssh failure by the runner marker", async () => {
+  // The OS probes succeed; only the exec call itself comes back with 255.
+  const mk = (stdout: string, stderr: string): Spawn => async (argv) =>
+    argv.at(-1) === "echo %OS%" || argv.at(-1) === "uname -s"
+      ? { code: 0, stdout: argv.at(-1) === "uname -s" ? "Linux\n" : "%OS%\n", stderr: "", timedOut: false }
+      : { code: 255, stdout, stderr, timedOut: false };
+  const run = (spawnFn: Spawn) =>
+    new Map(allTools({ exec: spawnExec("x"), clock: realClock, spawn: spawnFn, oses: new OsCache(spawnFn, "linux") }).map((t) => [t.name, t])).get("exec")!.run({ host: "box", command: "x" });
+  const ranScript = await run(mk("stick:ran\nout\n", "ssh: connect to host inner port 22: Connection refused\n"));
+  expect(ranScript.structuredContent.data).toMatchObject({ exit_code: 255, stdout: "out\n" });
+  const sshDown = await run(mk("", "ssh: connect to host box port 22: Connection refused\n"));
+  expect(sshDown.structuredContent.error).toMatchObject({ code: "unreachable" });
+});
+
 test("desktop refuses a host that is not Windows", async () => {
   const oses = new OsCache(async () => ({ code: 0, stdout: "%OS%\n", stderr: "", timedOut: false }));
   const t = new Map(allTools({ exec: spawnExec("x"), clock: realClock, oses }).map((x) => [x.name, x]));
