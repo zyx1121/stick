@@ -21957,6 +21957,7 @@ class Desktop {
   tokens = new Map;
   socketDir = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "stick");
   ports = new Map;
+  lastOk = new Map;
   constructor(run, fetchFn = fetch) {
     this.run = run;
     this.fetchFn = fetchFn;
@@ -22025,21 +22026,38 @@ class Desktop {
   async send(host, script, force) {
     await this.tunnel(host);
     let token = await this.token(host);
+    if (Date.now() - (this.lastOk.get(host) ?? 0) > 60000) {
+      let probe;
+      try {
+        probe = await this.post(host, "status", false, token);
+      } catch {
+        await this.tunnel(host, true);
+        try {
+          probe = await this.post(host, "status", false, token);
+        } catch (error) {
+          throw new TmuxError({ code: "desktop_down", message: `No answer from the desktop daemon on ${host}.`, why: String(error), hint: "Someone must be logged in at the desktop. Otherwise run desktop_install again." });
+        }
+      }
+      if (probe.status === 401)
+        token = await this.token(host, true);
+    }
     let answer;
     try {
       answer = await this.post(host, script, force, token);
-    } catch {
-      await this.tunnel(host, true);
-      try {
-        answer = await this.post(host, script, force, token);
-      } catch (error) {
-        throw new TmuxError({ code: "desktop_down", message: `No answer from the desktop daemon on ${host}.`, why: String(error), hint: "Someone must be logged in at the desktop. Otherwise run desktop_install again." });
-      }
+    } catch (error) {
+      this.lastOk.delete(host);
+      throw new TmuxError({
+        code: "desktop_unknown",
+        message: `The connection to ${host} dropped after the script was sent, so it may have run.`,
+        why: String(error),
+        hint: "Check the screen with snap or windows before you send it again."
+      });
     }
     if (answer.status === 401) {
       token = await this.token(host, true);
       answer = await this.post(host, script, force, token);
     }
+    this.lastOk.set(host, Date.now());
     const files = [];
     const names = new Set(answer.text.match(/(shot|rec)-\d+-\d+\.(jpg|mp4)/g) ?? []);
     if (names.size && !/^\s*log\b/.test(script)) {
@@ -23227,16 +23245,8 @@ $ErrorActionPreference = 'Stop'
 $root = 'C:\\dev\\fw'
 $fx = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319'
 
-# The daemon runs with the user's full rights. Only SYSTEM and Administrators
-# may touch its folder, so a process of the same user without elevation (or
-# another user) cannot read the token, swap fwd.exe or read screenshots.
-# Administrators also own it, so the user cannot reopen the ACL as owner.
-New-Item -ItemType Directory -Force -Path $root | Out-Null
-# The grant goes on the folder only; everything inside is reset to inherit it.
-# (OI)(CI) on a file is not valid and would leave the file with an empty ACL.
-icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
-icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
-icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null
+# Only SYSTEM and Administrators may touch the folder (see lock.ps1).
+& (Join-Path $PSScriptRoot 'lock.ps1')
 
 Stop-ScheduledTask -TaskName fw -ErrorAction SilentlyContinue
 Get-Process fwd -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -23257,11 +23267,55 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \`
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+# Lock again: fwd.exe and the token are new files.
+& (Join-Path $PSScriptRoot 'lock.ps1')
+
 Register-ScheduledTask -TaskName fw -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName fw
 Start-Sleep -Seconds 2
 if (-not (Get-Process fwd -ErrorAction SilentlyContinue)) { throw 'fwd did not start; is this user logged in at the console?' }
 'fwd is running'
+`;
+
+// windows/lock.ps1
+var lock_default = `# Lock C:\\dev\\fw: SYSTEM and Administrators only, owned by Administrators,
+# with no other grant left anywhere inside. The daemon runs with the user's
+# full rights, so anyone else who can write here, or read the token, can run
+# code as that user. Throws instead of continuing with a weaker folder.
+$root = 'C:\\dev\\fw'
+$allowed = 'S-1-5-18', 'S-1-5-32-544'
+$admins = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+if (Test-Path -LiteralPath $root) {
+    if ((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$root is a link. Remove it, then install again." }
+} else {
+    New-Item -ItemType Directory -Path $root | Out-Null
+}
+# A new security descriptor replaces every entry, including grants someone added by hand.
+$acl = New-Object Security.AccessControl.DirectorySecurity
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($sid in $allowed) {
+    $id = New-Object Security.Principal.SecurityIdentifier $sid
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+}
+$acl.SetOwner($admins)
+Set-Acl -LiteralPath $root -AclObject $acl
+# Everything inside inherits the folder's entries only, and Administrators own it.
+foreach ($item in Get-ChildItem -LiteralPath $root -Recurse -Force) {
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$($item.FullName) is a link. Remove it, then install again." }
+    $child = Get-Acl -LiteralPath $item.FullName
+    $child.SetAccessRuleProtection($false, $false)
+    foreach ($rule in @($child.Access | Where-Object { -not $_.IsInherited })) { [void]$child.RemoveAccessRuleSpecific($rule) }
+    $child.SetOwner($admins)
+    Set-Acl -LiteralPath $item.FullName -AclObject $child
+}
+foreach ($item in @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+    $check = Get-Acl -LiteralPath $item.FullName
+    $owner = (New-Object Security.Principal.NTAccount $check.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -ne $admins.Value) { throw "$($item.FullName) is owned by $($check.Owner)." }
+    foreach ($rule in $check.Access) {
+        if ($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { throw "$($item.FullName) still grants $($rule.IdentityReference)." }
+    }
+}
 `;
 
 // src/tools/desktop.ts
@@ -23316,16 +23370,15 @@ ${COMMANDS}`,
           return wrong;
         const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
         const script = [
-          `$root = ${powershellQuote(DAEMON_ROOT)}`,
-          `New-Item -ItemType Directory -Force -Path $root | Out-Null`,
-          `icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null`,
-          `icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null`,
-          `icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null`,
-          `$src = Join-Path $root 'src'`,
+          `$ErrorActionPreference = 'Stop'`,
+          lock_default,
+          `$src = Join-Path ${powershellQuote(DAEMON_ROOT)} 'src'`,
           `New-Item -ItemType Directory -Force -Path $src | Out-Null`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'fwd.cs'), [Convert]::FromBase64String('${b64(fwd_default)}'))`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'install.ps1'), [Convert]::FromBase64String('${b64(install_default)}'))`,
-          `powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'install.ps1')`
+          `[IO.File]::WriteAllBytes((Join-Path $src 'lock.ps1'), [Convert]::FromBase64String('${b64(lock_default)}'))`,
+          `powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'install.ps1')`,
+          `if ($LASTEXITCODE) { exit $LASTEXITCODE }`
         ].join(`
 `);
         const result = await execOn(run, host, "windows", script, undefined, 300000);

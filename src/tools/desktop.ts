@@ -7,6 +7,7 @@ import type { OsCache, Spawn } from "../host/os.ts";
 import { HOST_PATTERN } from "../tmux/exec.ts";
 import daemonSource from "../../windows/fwd.cs" with { type: "text" };
 import installer from "../../windows/install.ps1" with { type: "text" };
+import lock from "../../windows/lock.ps1" with { type: "text" };
 
 const windowsHost = z.string().regex(HOST_PATTERN, "A host is an SSH alias, user@host or address.").describe("SSH host of a Windows machine. Log in as the user who sits at its desktop.");
 
@@ -61,17 +62,16 @@ export function desktopTools(run: Spawn, oses: OsCache, desktop: Desktop): Toolb
         if (wrong) return wrong;
         const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
         const script = [
-          `$root = ${powershellQuote(DAEMON_ROOT)}`,
-          // Lock the folder before any file lands in it. install.ps1 repeats this for older installs.
-          `New-Item -ItemType Directory -Force -Path $root | Out-Null`,
-          `icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null`,
-          `icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null`,
-          `icacls "$root\\*" /reset /T /C /Q 2>&1 | Out-Null`,
-          `$src = Join-Path $root 'src'`,
+          // Lock the folder before any file lands in it; install.ps1 runs the same lock again.
+          `$ErrorActionPreference = 'Stop'`,
+          lock,
+          `$src = Join-Path ${powershellQuote(DAEMON_ROOT)} 'src'`,
           `New-Item -ItemType Directory -Force -Path $src | Out-Null`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'fwd.cs'), [Convert]::FromBase64String('${b64(daemonSource)}'))`,
           `[IO.File]::WriteAllBytes((Join-Path $src 'install.ps1'), [Convert]::FromBase64String('${b64(installer)}'))`,
+          `[IO.File]::WriteAllBytes((Join-Path $src 'lock.ps1'), [Convert]::FromBase64String('${b64(lock)}'))`,
           `powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'install.ps1')`,
+          `if ($LASTEXITCODE) { exit $LASTEXITCODE }`,
         ].join("\n");
         const result = await execOn(run, host, "windows", script, undefined, 300000);
         desktop.forget(host);

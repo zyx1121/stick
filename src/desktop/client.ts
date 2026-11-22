@@ -28,6 +28,7 @@ export class Desktop {
   private tokens = new Map<string, string>();
   private socketDir = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "stick");
   private ports = new Map<string, number>();
+  private lastOk = new Map<string, number>();
 
   constructor(private run: Spawn, private fetchFn: typeof fetch = fetch) {}
 
@@ -90,26 +91,48 @@ export class Desktop {
     return { status: res.status, text: await res.text() };
   }
 
-  /** Send a script of desktop commands and download any screenshots or recordings it names. */
+  /**
+   * Send a script of desktop commands and download any screenshots or
+   * recordings it names. A script is never sent twice: a click or a typed
+   * form could run twice. When the tunnel has been idle, a read-only status
+   * call checks it first, and a dead tunnel is rebuilt before the real script.
+   */
   async send(host: string, script: string, force: boolean): Promise<DesktopReply> {
     await this.tunnel(host);
     let token = await this.token(host);
+    if (Date.now() - (this.lastOk.get(host) ?? 0) > 60000) {
+      let probe: { status: number; text: string };
+      try {
+        probe = await this.post(host, "status", false, token);
+      } catch {
+        // A tunnel that outlived a reboot of the host accepts the connection and then fails.
+        await this.tunnel(host, true);
+        try {
+          probe = await this.post(host, "status", false, token);
+        } catch (error) {
+          throw new TmuxError({ code: "desktop_down", message: `No answer from the desktop daemon on ${host}.`, why: String(error), hint: "Someone must be logged in at the desktop. Otherwise run desktop_install again." });
+        }
+      }
+      if (probe.status === 401) token = await this.token(host, true);
+    }
     let answer: { status: number; text: string };
     try {
       answer = await this.post(host, script, force, token);
-    } catch {
-      // A tunnel that outlived a reboot of the host accepts the connection and then fails.
-      await this.tunnel(host, true);
-      try {
-        answer = await this.post(host, script, force, token);
-      } catch (error) {
-        throw new TmuxError({ code: "desktop_down", message: `No answer from the desktop daemon on ${host}.`, why: String(error), hint: "Someone must be logged in at the desktop. Otherwise run desktop_install again." });
-      }
+    } catch (error) {
+      this.lastOk.delete(host);
+      throw new TmuxError({
+        code: "desktop_unknown",
+        message: `The connection to ${host} dropped after the script was sent, so it may have run.`,
+        why: String(error),
+        hint: "Check the screen with snap or windows before you send it again.",
+      });
     }
+    // The daemon checks the token before it runs anything, so a 401 is safe to send again.
     if (answer.status === 401) {
       token = await this.token(host, true);
       answer = await this.post(host, script, force, token);
     }
+    this.lastOk.set(host, Date.now());
     const files: string[] = [];
     const names = new Set(answer.text.match(/(shot|rec)-\d+-\d+\.(jpg|mp4)/g) ?? []);
     if (names.size && !/^\s*log\b/.test(script)) {

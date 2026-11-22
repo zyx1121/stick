@@ -5,16 +5,8 @@ $ErrorActionPreference = 'Stop'
 $root = 'C:\dev\fw'
 $fx = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
 
-# The daemon runs with the user's full rights. Only SYSTEM and Administrators
-# may touch its folder, so a process of the same user without elevation (or
-# another user) cannot read the token, swap fwd.exe or read screenshots.
-# Administrators also own it, so the user cannot reopen the ACL as owner.
-New-Item -ItemType Directory -Force -Path $root | Out-Null
-# The grant goes on the folder only; everything inside is reset to inherit it.
-# (OI)(CI) on a file is not valid and would leave the file with an empty ACL.
-icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
-icacls $root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
-icacls "$root\*" /reset /T /C /Q 2>&1 | Out-Null
+# Only SYSTEM and Administrators may touch the folder (see lock.ps1).
+& (Join-Path $PSScriptRoot 'lock.ps1')
 
 Stop-ScheduledTask -TaskName fw -ErrorAction SilentlyContinue
 Get-Process fwd -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -35,6 +27,9 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+# Lock again: fwd.exe and the token are new files.
+& (Join-Path $PSScriptRoot 'lock.ps1')
+
 Register-ScheduledTask -TaskName fw -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName fw
 Start-Sleep -Seconds 2
