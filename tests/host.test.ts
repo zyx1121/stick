@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, utimes, readdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sshHosts } from "../src/host/config.ts";
@@ -47,6 +47,41 @@ test("posix plan: the script goes on stdin to a runner that saves it first, cwd 
   expect(argv.slice(-2)).toEqual(["--", `sh -c ${posixQuote(POSIX_RUNNER)}`]);
   expect(stdin).toBe(`cd -- '/tmp/it'\\''s' || exit 1\necho hi\n`);
   expect(plan(undefined, "posix", "x").argv).toEqual(["sh", "-c", POSIX_RUNNER]);
+});
+
+test("posix runner saves scripts in a private 0700 folder and sweeps old files", async () => {
+  const base = await mkdtemp(join(tmpdir(), "stick-runner-"));
+  const dir = join(base, `stick-${process.getuid!()}`);
+  try {
+    await mkdir(dir, { mode: 0o755 });
+    const old = join(dir, "old.sh");
+    await writeFile(old, "x");
+    const past = new Date(Date.now() - 2 * 86400_000);
+    await utimes(old, past, past);
+    const { argv, stdin } = plan(undefined, "posix", `echo $0; ls -ld ${posixQuote(dir)}`);
+    const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", env: { ...process.env, TMPDIR: base } });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toContain(`${dir}/run.`);
+    expect(out).toContain("drwx------");
+    expect((await readdir(dir)).length).toBe(0);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("posix runner refuses a symlinked folder", async () => {
+  const base = await mkdtemp(join(tmpdir(), "stick-runner-"));
+  try {
+    await mkdir(join(base, "other"));
+    await symlink(join(base, "other"), join(base, `stick-${process.getuid!()}`));
+    const { argv, stdin } = plan(undefined, "posix", "echo hi");
+    const proc = Bun.spawn(argv, { stdin: new Blob([stdin]), stdout: "pipe", env: { ...process.env, TMPDIR: base } });
+    await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(125);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("powershellQuote doubles single quotes", () => {

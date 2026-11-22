@@ -76,7 +76,10 @@ export function posixQuote(word: string): string {
  * the lines of the script that follow it.
  */
 export const POSIX_RUNNER =
-  `printf 'stick:ran\\n'; f=$(mktemp) || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` +
+  `printf 'stick:ran\\n'; umask 077; d="\${TMPDIR:-/tmp}/stick-$(id -u)"; mkdir -p "$d"; ` +
+  `if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then exit 125; fi; chmod 700 "$d" || exit 125; ` +
+  `find "$d" -type f -mmin +1440 -exec rm -f {} + 2>/dev/null; ` +
+  `f=$(mktemp "$d/run.XXXXXX") || exit 125; trap "rm -f \\"\\$f\\"" EXIT; cat >"$f"; ` +
   `if command -v bash >/dev/null 2>&1; then bash "$f"; else sh "$f"; fi </dev/null`;
 const POSIX_COMMAND = `sh -c ${posixQuote(POSIX_RUNNER)}`;
 
