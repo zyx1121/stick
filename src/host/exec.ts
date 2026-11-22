@@ -38,7 +38,7 @@ const WINDOWS_RUNNER = [
  * Fixed outer PowerShell, sent as -EncodedCommand so no shell between here and
  * powershell.exe parses it. It reads the script from stdin as base64 lines up
  * to a line holding "." (Windows OpenSSH never passes end of input), saves it
- * to a temp file, and runs WINDOWS_RUNNER in a child whose stdin is an empty
+ * to a file in %TEMP%\\stick (files older than one day are swept there), and runs WINDOWS_RUNNER in a child whose stdin is an empty
  * file. The first stdin line is a run id: the child's PID goes to
  * %TEMP%\\stick-<id>.pid so killRun can stop it after a timeout. Otherwise a native program in the script (git, cmd) would wait on the
  * ssh stdin that never closes.
@@ -46,7 +46,8 @@ const WINDOWS_RUNNER = [
 const WINDOWS_OUTER = [
   `[Console]::Out.Write("stick:ran\`n");$ProgressPreference="SilentlyContinue";$id=[Console]::In.ReadLine();$b=[Text.StringBuilder]::new()`,
   `while(($l=[Console]::In.ReadLine()) -ne $null -and $l -ne "."){[void]$b.Append($l)}`,
-  `$f=[IO.Path]::GetTempFileName();$n=[IO.Path]::GetTempFileName()`,
+  `$d=Join-Path $env:TEMP "stick";$null=New-Item -ItemType Directory -Force -Path $d;Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue|?{$_.LastWriteTime -lt (Get-Date).AddDays(-1)}|Remove-Item -Force -ErrorAction SilentlyContinue`,
+  `$f=[IO.Path]::Combine($d,[Guid]::NewGuid().ToString("N")+".ps1");$n=[IO.Path]::Combine($d,[Guid]::NewGuid().ToString("N")+".in");[IO.File]::WriteAllBytes($n,[byte[]]@())`,
   `[IO.File]::WriteAllBytes($f,[Convert]::FromBase64String($b.ToString()));$env:STICK_SCRIPT=$f`,
   `$p=Start-Process powershell -ArgumentList "-NoProfile -NonInteractive -EncodedCommand ${utf16Base64(WINDOWS_RUNNER)}" -NoNewWindow -PassThru -RedirectStandardInput $n`,
   `$null=$p.Handle;$k=Join-Path $env:TEMP "stick-$id.pid";[IO.File]::WriteAllText($k,[string]$p.Id);$p.WaitForExit()`,
