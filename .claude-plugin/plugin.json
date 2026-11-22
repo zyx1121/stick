@@ -1,16 +1,17 @@
 {
-  "name": "tmux",
-  "version": "0.1.0",
-  "description": "Drive tmux on this machine or any SSH host through MCP: run a command and get its output and exit code.",
+  "name": "stick",
+  "version": "0.2.0",
+  "description": "One MCP tool for every machine you can ssh into: run commands on Linux or Windows, drive tmux, and use a Windows desktop.",
   "author": {
     "name": "zyx1121",
     "url": "https://github.com/zyx1121"
   },
-  "repository": "https://github.com/zyx1121/tmux",
+  "repository": "https://github.com/zyx1121/stick",
   "license": "MIT",
   "keywords": [
     "tmux",
     "ssh",
+    "windows",
     "terminal",
     "mcp",
     "codex",

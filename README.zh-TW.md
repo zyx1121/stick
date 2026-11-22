@@ -1,75 +1,57 @@
 <div align="center">
 
-<h1>tmux</h1>
+<h1>stick</h1>
 
-<p><strong>讓 agent 在任何 SSH 主機的 tmux 裡跑指令，拿回輸出與 exit code。</strong></p>
+<p><strong>1 個 MCP 工具操作每一台能 ssh 的機器：在 Linux 或 Windows 跑指令、操作 tmux、使用 Windows 桌面。</strong></p>
 
-[![CI](https://img.shields.io/github/actions/workflow/status/zyx1121/tmux/check.yml?branch=main&style=flat-square&label=CI)](https://github.com/zyx1121/tmux/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/zyx1121/stick/check.yml?branch=main&style=flat-square&label=CI)](https://github.com/zyx1121/stick/actions)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-D97757?style=flat-square)](https://github.com/zyx1121/marketplace)
-[![License](https://img.shields.io/github/license/zyx1121/tmux?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/github/license/zyx1121/stick?style=flat-square)](LICENSE)
 
 [English](README.md) | **繁體中文** | [简体中文](README.zh-CN.md)
 
 </div>
 
 ```console
-$ tmux_run { "host": "build-box", "target": "work", "command": "make test" }
-{"data": {"done": true, "exit_code": 2, "output": "...\nFAIL: test_parse (1 of 84)",
-  "run_id": "9f2c41d0aa", "target": "%3", "elapsed_ms": 41210}}
+$ exec { "host": "win-box", "command": "Get-Item \"C:\\Users\\me\"; \"中文 'ok'\"; exit 7" }
+{"data": {"os": "windows", "exit_code": 7, "stdout": "C:\\Users\\me\n中文 'ok'\n", "stderr": ""}}
 ```
 
-用 `send-keys` 操作 tmux 的 agent，要記得按 Enter、猜指令何時結束，還要從畫面裡挑出輸出。這個插件把這些寫死在程式裡：一次呼叫就送出指令、等它結束，只回傳它的輸出與 exit code。session 會留著，人可以 `tmux attach` 看同一個畫面。
+用 `ssh host '...'` 送出的指令，路上會經過 2 到 4 個解析器：本機 shell、ssh，再來是 bash，或是 Windows 上的 cmd、PowerShell，甚至 WSL。每一層都用自己的方式吃掉引號、反斜線或分號，Windows 還會用自己的編碼回答。agent 只好一直改寫同一條指令。stick 改把指令從 stdin 送過去，中間的解析器都看不到它，回來的一律是 UTF-8 加 exit code。
 
 ## 功能
 
-- **跑指令並回傳結果**：輸出、exit code 與耗時，單行或整段腳本都行。
-- **任何 SSH 主機都能用**：`host` 填 `~/.ssh/config` 裡的名稱。主機上只需要 tmux。
-- **長時間工作不中斷**：超過 timeout 的指令會繼續跑，之後用 `tmux_wait` 接手。
-- **等待特定輸出**：等到 server 印出就緒訊息，或程式跳出提問。
-- **不會打進忙碌的 pane**：pane 正在跑 vim 或 server 時回 `busy`，不會打出亂掉的指令。
+- **每種系統同一個呼叫**：`exec` 帶主機和腳本。posix 主機寫 bash，Windows 主機寫 PowerShell，傳送方式由工具決定。
+- **不用跳脫**：引號、反斜線、分號、中文原樣送達，也不受 cmd 8191 字元上限限制。
+- **長時間工作放 tmux**：`tmux_run` 在提示字元打指令、等它結束，只回傳它的輸出與 exit code。
+- **Windows 桌面變文字**：`desktop` 把視窗讀成文字樹，可以點擊、輸入、拍小截圖，截圖存到本機。
+- **記得每台主機**：第 1 次連線時偵測系統並記住。
 
 ## 快速開始
 
 ```sh
 claude plugin marketplace add zyx1121/marketplace
-claude plugin install tmux@zyx1121
+claude plugin install stick@zyx1121
 ```
 
-Codex：`codex plugin marketplace add zyx1121/marketplace`，再 `codex plugin add tmux@zyx1121`。
-
-本機需要 Bun，被操作的主機需要 tmux。開新 session 後問「在 build 機開一個 tmux session 跑測試」。
+本機需要 Bun，每台主機要能用金鑰 ssh 登入。tmux 工具需要主機裝 tmux。桌面工具要先對每台 Windows 主機呼叫一次 `desktop_install`。
 
 ## 使用
 
-| Tool | 用途 |
-|------|------|
-| `tmux_new` | 開一個背景 session，等到出現提示字元 |
-| `tmux_run` | 跑 shell 指令，回傳輸出與 exit code |
-| `tmux_wait` | 等先前的指令(`run_id`)結束，或等某行出現(`pattern`) |
-| `tmux_read` | 讀 pane 最後幾行與狀態 |
-| `tmux_send` | 對互動程式輸入文字或按鍵，例如 `C-c` |
-| `tmux_list` | 列出主機上所有 pane |
-| `tmux_kill` | 結束 session |
-
-- 每個 tool 都有 `host`，省略就是本機。
-- `target` 可以是 session 名稱、`session:window.pane`，或 pane ID 例如 `%3`。結果會回傳 pane ID，視窗移動後仍然有效。
-- 結果格式一致：成功時有 `data`，失敗時有 `error`，附 `code` 與 `hint`。
-
-## 設定
-
-| 變數 | 用途 | 預設 |
+| Tool | 用途 | 系統 |
 |------|------|------|
-| `TMUX_MCP_SOCKET` | 每台主機使用的 tmux socket 名稱(`tmux -L`) | 預設 socket |
-
-SSH 設定沿用 `~/.ssh/config`。在那裡開啟共用連線(`ControlMaster auto`、`ControlPersist`)，每次呼叫只花約 10 ms，不用重新握手。
+| `hosts` | 列出 `~/.ssh/config` 的主機，或偵測一台的系統 | 全部 |
+| `exec` | 跑腳本，回傳 stdout、stderr 與 exit code | 全部 |
+| `tmux_*` | 開 session、跑指令、等待、讀取、輸入、列出、結束 | posix |
+| `desktop` | 桌面指令：`windows`、`snap`、`click`、`type`、`shot` | Windows |
+| `desktop_install` | 在主機上編譯並啟動桌面 daemon | Windows |
 
 ## 限制
 
-- `tmux_run` 需要 POSIX shell(bash、zsh、sh、dash、ksh)，fish 會回 `busy`。
-- 標記行會留在 pane 畫面上。
-- 輸出超過 pane 的歷史上限時會遺失開頭，`truncated` 為 true。結果保留最後 20,000 字元。
-- SSH 登入需要密碼或觸控確認的主機會回 `unreachable`。
-- 不支援 Windows 主機，請透過 SSH 進 WSL 使用 tmux。
+- 不會在 bash 和 PowerShell 之間翻譯。`hosts` 和結果的 `os` 欄位會告訴你該寫哪一種。
+- ssh 登入需要密碼或觸控確認的主機會回 `unreachable`。
+- Windows 主機沒有 tmux，要用 WSL 請透過它自己的 ssh 主機。
+- 桌面 daemon 需要有人登入在主控台。
 
 ## 授權
 

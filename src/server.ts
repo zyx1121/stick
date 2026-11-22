@@ -7,7 +7,7 @@ import { allTools } from "./tools/index.ts";
 import manifest from "../plugin.json";
 
 const server = new McpServer({ name: manifest.name, version: manifest.version });
-const tools = allTools(spawnExec(process.env.TMUX_MCP_SOCKET || undefined), realClock);
+const tools = allTools({ exec: spawnExec(process.env.STICK_TMUX_SOCKET || undefined), clock: realClock });
 registerTools(server, tools);
-console.error(`[tmux-mcp] registered ${tools.length}`);
+console.error(`[stick] registered ${tools.length}`);
 await server.connect(new StdioServerTransport());
